@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TripLedger — Business Travel Expenses</title>
+<meta name="theme-color" content="#4f8ef7">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TripLedger">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getFirestore, collection, doc, addDoc, updateDoc, deleteDoc,
+  onSnapshot, query, orderBy, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ─── YOUR FIREBASE CONFIG ─────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyBbLMMS5fVV27HN0oFZVPySmiQ2EQyUBC8",
+  authDomain: "trip-expense-874fa.firebaseapp.com",
+  projectId: "trip-expense-874fa",
+  storageBucket: "trip-expense-874fa.firebasestorage.app",
+  messagingSenderId: "541118950288",
+  appId: "1:541118950288:web:2026f5c18e45b74c882115"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// ─── STATE ────────────────────────────────────────────────────────
+let state = {
+  trips: [],
+  expenses: [],
+  activeTrip: null,
+  summaryTrip: null,
+  exportTrip: null,
+  currentPage: 'trips',
+  splitType: 'equal',
+  selectedCat: '🏨 Hotel',
+  pickerContext: 'expenses',
+  unsubTrips: null,
+  unsubExpenses: null
+};
+
+// ─── FIREBASE LISTENERS ───────────────────────────────────────────
+function startListeners() {
+  // Trips
+  const tripsQ = query(collection(db, 'trips'), orderBy('created', 'desc'));
+  state.unsubTrips = onSnapshot(tripsQ, snap => {
+    state.trips = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (state.currentPage === 'trips') renderTrips();
+    updateSyncStatus('synced');
+  }, err => {
+    console.error(err);
+    updateSyncStatus('error');
+  });
+
+  // Expenses
+  const expsQ = query(collection(db, 'expenses'), orderBy('created', 'desc'));
+  state.unsubExpenses = onSnapshot(expsQ, snap => {
+    state.expenses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (state.currentPage === 'expenses') renderExpenses();
+    if (state.currentPage === 'summary') renderSummary();
+    if (state.currentPage === 'export') renderExport();
+  });
+}
+
+async function addTrip(data) {
+  await addDoc(collection(db, 'trips'), { ...data, created: serverTimestamp() });
+}
+async function updateTrip(id, data) {
+  await updateDoc(doc(db, 'trips', id), data);
+}
+async function removeTrip(id) {
+  await deleteDoc(doc(db, 'trips', id));
+  // delete associated expenses
+  const toDelete = state.expenses.filter(e => e.tripId === id);
+  for (const e of toDelete) await deleteDoc(doc(db, 'expenses', e.id));
+}
+async function addExpense(data) {
+  await addDoc(collection(db, 'expenses'), { ...data, created: serverTimestamp() });
+}
+async function removeExpense(id) {
+  await deleteDoc(doc(db, 'expenses', id));
+}
+
+// ─── UTILS ───────────────────────────────────────────────────────
+function fmt(n) { return '₹' + Number(n).toLocaleString('en-IN'); }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+function today() { return new Date().toISOString().slice(0,10); }
+function getColor(name) {
+  const colors = ['c1','c2','c3','c4','c5','c6','c7','c8'];
+  let h = 0; for (let c of (name||'?')) h += c.charCodeAt(0);
+  return colors[h % colors.length];
+}
+function formatDate(d) {
+  return new Date(d + 'T12:00:00').toLocaleDateString('en-IN', { day:'numeric', month:'short', year:'numeric' });
+}
+function updateSyncStatus(status) {
+  const el = document.getElementById('sync-dot');
+  if (!el) return;
+  if (status === 'synced') { el.style.background = 'var(--green)'; el.title = 'Synced'; }
+  else if (status === 'syncing') { el.style.background = 'var(--yellow)'; el.title = 'Syncing...'; }
+  else { el.style.background = 'var(--red)'; el.title = 'Sync error'; }
+}
+
+// ─── NAV ─────────────────────────────────────────────────────────
+window.showPage = function(p) {
+  state.currentPage = p;
+  document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('page-' + p).classList.add('active');
+  document.querySelectorAll('.nav-btn')[['trips','expenses','summary','export'].indexOf(p)].classList.add('active');
+  if (p === 'expenses') renderExpenses();
+  if (p === 'summary') renderSummary();
+  if (p === 'export') renderExport();
+  if (p === 'trips') renderTrips();
+  document.getElementById('fab-btn').style.display = (p === 'trips' || p === 'expenses') ? 'flex' : 'none';
+}
+
+window.handleFab = function() {
+  if (state.currentPage === 'trips') openModal('modal-trip');
+  else if (state.currentPage === 'expenses') {
+    if (!state.activeTrip) { openTripPicker(); return; }
+    openAddExpense();
+  }
+}
+
+// ─── MODALS ──────────────────────────────────────────────────────
+window.openModal = function(id) { document.getElementById(id).classList.add('open'); }
+window.closeModal = function(id) { document.getElementById(id).classList.remove('open'); }
+
+// ─── TRIPS ───────────────────────────────────────────────────────
+let tripPeople = [];
+
+window.addPerson = function() {
+  const input = document.getElementById('person-input');
+  const name = input.value.trim();
+  if (!name || tripPeople.includes(name)) { input.value = ''; return; }
+  tripPeople.push(name);
+  input.value = '';
+  renderPeopleChips();
+}
+window.removePerson = function(i) { tripPeople.splice(i,1); renderPeopleChips(); }
+
+function renderPeopleChips() {
+  document.getElementById('people-chips').innerHTML = tripPeople.map((p,i) => `
+    <div class="person-chip">
+      <div class="avatar ${getColor(p)}" style="color:#fff">${p[0].toUpperCase()}</div>
+      ${p}
+      <button class="chip-del" onclick="removePerson(${i})">×</button>
+    </div>`).join('');
+}
+
+window.saveTrip = async function() {
+  const name = document.getElementById('trip-name-input').value.trim();
+  const dest = document.getElementById('trip-dest-input').value.trim();
+  const start = document.getElementById('trip-start-input').value;
+  const end = document.getElementById('trip-end-input').value;
+  if (!name) return alert('Please enter a trip name');
+  if (tripPeople.length === 0) return alert('Add at least one person');
+  updateSyncStatus('syncing');
+  await addTrip({ name, dest, start, end, people: [...tripPeople], status: 'active', createdDate: today() });
+  closeModal('modal-trip');
+  document.getElementById('trip-name-input').value = '';
+  document.getElementById('trip-dest-input').value = '';
+  document.getElementById('trip-start-input').value = '';
+  document.getElementById('trip-end-input').value = '';
+  tripPeople = [];
+  renderPeopleChips();
+}
+
+function renderTrips() {
+  const el = document.getElementById('trips-list');
+  const empty = document.getElementById('trips-empty');
+  if (state.trips.length === 0) { el.innerHTML = ''; empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+  el.innerHTML = state.trips.map(t => {
+    const exps = state.expenses.filter(e => e.tripId === t.id);
+    const total = exps.reduce((s,e) => s + Number(e.amount), 0);
+    return `
+    <div class="card" onclick="openTripDetail('${t.id}')">
+      <div class="card-row">
+        <div>
+          <div class="card-title">${t.name}</div>
+          <div class="card-sub">${t.dest||''} · ${t.people.length} people</div>
+        </div>
+        <span class="tag ${t.status==='active'?'tag-active':'tag-closed'}">${t.status}</span>
+      </div>
+      <div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between">
+        <div class="people-row" style="margin:0;gap:4px">
+          ${t.people.slice(0,4).map(p=>`<div class="avatar ${getColor(p)}" style="color:#fff;width:28px;height:28px;font-size:11px">${p[0].toUpperCase()}</div>`).join('')}
+          ${t.people.length>4?`<div class="avatar" style="background:var(--surface2);width:28px;height:28px;font-size:11px;color:var(--muted)">+${t.people.length-4}</div>`:''}
+        </div>
+        <div class="amount amount-green">${fmt(total)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+window.openTripDetail = function(id) {
+  const t = state.trips.find(x=>x.id===id); if (!t) return;
+  const exps = state.expenses.filter(e=>e.tripId===id);
+  const total = exps.reduce((s,e)=>s+Number(e.amount),0);
+  document.getElementById('trip-detail-content').innerHTML = `
+    <div style="margin-bottom:20px">
+      <div style="font-size:22px;font-weight:800;margin-bottom:4px">${t.name}</div>
+      <div style="font-size:13px;color:var(--muted)">${t.dest||''} · ${t.start||''} to ${t.end||''}</div>
+    </div>
+    <div class="stat-grid" style="margin-bottom:16px">
+      <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value amount-green">${fmt(total)}</div></div>
+      <div class="stat-card"><div class="stat-label">Expenses</div><div class="stat-value">${exps.length}</div></div>
+    </div>
+    <div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">People</div>
+      <div class="people-row">${t.people.map(p=>`<div class="person-chip"><div class="avatar ${getColor(p)}" style="color:#fff">${p[0].toUpperCase()}</div>${p}</div>`).join('')}</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="setActiveTripAndGo('${id}')">📋 View Expenses</button>
+      <button class="btn btn-green btn-sm" onclick="toggleStatus('${id}')">
+        ${t.status==='active'?'✅ Mark Closed':'🔄 Reopen'}
+      </button>
+      <button class="btn btn-danger btn-sm" onclick="deleteTripConfirm('${id}')">🗑 Delete</button>
+    </div>`;
+  openModal('modal-trip-detail');
+}
+
+window.setActiveTripAndGo = function(id) {
+  state.activeTrip = id;
+  closeModal('modal-trip-detail');
+  const t = state.trips.find(x=>x.id===id);
+  document.getElementById('active-trip-name').textContent = t.name;
+  showPage('expenses');
+}
+
+window.toggleStatus = async function(id) {
+  const t = state.trips.find(x=>x.id===id); if (!t) return;
+  updateSyncStatus('syncing');
+  await updateTrip(id, { status: t.status==='active'?'closed':'active' });
+  closeModal('modal-trip-detail');
+}
+
+window.deleteTripConfirm = async function(id) {
+  if (!confirm('Delete this trip and all its expenses?')) return;
+  updateSyncStatus('syncing');
+  await removeTrip(id);
+  if (state.activeTrip===id) { state.activeTrip=null; document.getElementById('active-trip-name').textContent='Select a trip'; }
+  closeModal('modal-trip-detail');
+}
+
+// ─── TRIP PICKER ─────────────────────────────────────────────────
+window.openTripPicker = function(ctx='expenses') {
+  state.pickerContext = ctx;
+  const el = document.getElementById('trip-picker-list');
+  if (state.trips.length===0) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">✈️</div><div class="empty-text">No trips yet. Create one first!</div></div>';
+  } else {
+    el.innerHTML = state.trips.map(t=>`
+      <div class="card" onclick="selectTrip('${t.id}')" style="margin-bottom:8px">
+        <div class="card-row">
+          <div><div class="card-title">${t.name}</div><div class="card-sub">${t.dest||''} · ${t.people.length} people</div></div>
+          <span class="tag ${t.status==='active'?'tag-active':'tag-closed'}">${t.status}</span>
+        </div>
+      </div>`).join('');
+  }
+  openModal('modal-picker');
+}
+
+window.selectTrip = function(id) {
+  const t = state.trips.find(x=>x.id===id); if (!t) return;
+  closeModal('modal-picker');
+  if (state.pickerContext==='expenses') {
+    state.activeTrip=id;
+    document.getElementById('active-trip-name').textContent=t.name;
+    renderExpenses();
+  } else if (state.pickerContext==='summary') {
+    state.summaryTrip=id;
+    document.getElementById('summary-trip-name').textContent=t.name;
+    renderSummary();
+  } else if (state.pickerContext==='export') {
+    state.exportTrip=id;
+    document.getElementById('export-trip-name').textContent=t.name;
+    renderExport();
+  }
+}
+
+// ─── EXPENSES ────────────────────────────────────────────────────
+window.selectCat = function(el) {
+  document.querySelectorAll('.cat-chip').forEach(c=>c.classList.remove('selected'));
+  el.classList.add('selected');
+  state.selectedCat = el.dataset.cat;
+}
+window.setSplit = function(type) {
+  state.splitType = type;
+  document.getElementById('split-equal-btn').classList.toggle('active', type==='equal');
+  document.getElementById('split-person-btn').classList.toggle('active', type==='person');
+}
+
+function openAddExpense() {
+  const trip = state.trips.find(t=>t.id===state.activeTrip); if (!trip) return;
+  const sel = document.getElementById('exp-paidby-input');
+  sel.innerHTML = trip.people.map(p=>`<option value="${p}">${p}</option>`).join('');
+  document.getElementById('exp-desc-input').value = '';
+  document.getElementById('exp-amount-input').value = '';
+  document.getElementById('exp-date-input').value = today();
+  // reset cat
+  document.querySelectorAll('.cat-chip').forEach(c=>c.classList.remove('selected'));
+  document.querySelector('.cat-chip').classList.add('selected');
+  state.selectedCat = '🏨 Hotel';
+  setSplit('equal');
+  openModal('modal-expense');
+}
+
+window.saveExpense = async function() {
+  const desc = document.getElementById('exp-desc-input').value.trim();
+  const amount = document.getElementById('exp-amount-input').value;
+  const paidBy = document.getElementById('exp-paidby-input').value;
+  const date = document.getElementById('exp-date-input').value;
+  if (!desc || !amount) return alert('Please fill description and amount');
+  const trip = state.trips.find(t=>t.id===state.activeTrip);
+  updateSyncStatus('syncing');
+  await addExpense({
+    tripId: state.activeTrip,
+    desc, amount: Number(amount), paidBy, date,
+    cat: state.selectedCat,
+    split: state.splitType,
+    people: state.splitType==='equal' ? [...trip.people] : [paidBy]
+  });
+  closeModal('modal-expense');
+}
+
+window.deleteExpense = async function(id) {
+  updateSyncStatus('syncing');
+  await removeExpense(id);
+}
+
+function renderExpenses() {
+  const exps = state.expenses.filter(e=>e.tripId===state.activeTrip);
+  const total = exps.reduce((s,e)=>s+e.amount,0);
+  const el = document.getElementById('expenses-list');
+  const empty = document.getElementById('expenses-empty');
+  const stats = document.getElementById('expenses-stats');
+
+  if (!state.activeTrip) {
+    stats.style.display='none'; el.innerHTML='';
+    empty.style.display='block';
+    empty.innerHTML='<div class="empty-icon">💸</div><div class="empty-text">Select a trip to view expenses.</div>';
+    return;
+  }
+  stats.style.display='block';
+  document.getElementById('exp-total').textContent=fmt(total);
+  document.getElementById('exp-count').textContent=exps.length;
+
+  if (exps.length===0) {
+    empty.style.display='block';
+    empty.innerHTML='<div class="empty-icon">💸</div><div class="empty-text">No expenses yet. Tap + to add one.</div>';
+    el.innerHTML=''; return;
+  }
+  empty.style.display='none';
+
+  const grouped = {};
+  [...exps].sort((a,b)=>b.date.localeCompare(a.date)).forEach(e=>{
+    if (!grouped[e.date]) grouped[e.date]=[];
+    grouped[e.date].push(e);
+  });
+
+  el.innerHTML = Object.entries(grouped).map(([date,items])=>`
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:16px 0 8px">${formatDate(date)}</div>
+    <div class="card" style="padding:4px 16px">
+      ${items.map(e=>`
+        <div class="expense-row">
+          <div class="expense-icon">${e.cat.split(' ')[0]}</div>
+          <div class="expense-info">
+            <div class="expense-name">${e.desc}</div>
+            <div class="expense-meta">${e.paidBy} paid · ${e.split==='equal'?'split equally':'personal'}</div>
+          </div>
+          <div style="text-align:right">
+            <div class="amount-sm amount-green mono">${fmt(e.amount)}</div>
+            <button onclick="deleteExpense('${e.id}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:16px;margin-top:2px">×</button>
+          </div>
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+// ─── SUMMARY ─────────────────────────────────────────────────────
+function renderSummary() {
+  const el = document.getElementById('summary-content');
+  const id = state.summaryTrip;
+  if (!id) { el.innerHTML=''; return; }
+  const trip = state.trips.find(t=>t.id===id); if (!trip) return;
+  const exps = state.expenses.filter(e=>e.tripId===id);
+  const total = exps.reduce((s,e)=>s+e.amount,0);
+
+  const perPersonOwed={}, perPersonPaid={};
+  trip.people.forEach(p=>{ perPersonOwed[p]=0; perPersonPaid[p]=0; });
+  exps.forEach(e=>{
+    perPersonPaid[e.paidBy]=(perPersonPaid[e.paidBy]||0)+e.amount;
+    const share=e.amount/e.people.length;
+    e.people.forEach(p=>{ perPersonOwed[p]=(perPersonOwed[p]||0)+share; });
+  });
+  const maxSpend=Math.max(...Object.values(perPersonOwed),1);
+
+  el.innerHTML=`
+    <div class="stat-grid" style="margin-bottom:16px">
+      <div class="stat-card"><div class="stat-label">Grand Total</div><div class="stat-value amount-green">${fmt(total)}</div></div>
+      <div class="stat-card"><div class="stat-label">Per Person</div><div class="stat-value">${fmt(total/(trip.people.length||1))}</div></div>
+    </div>
+    ${trip.people.map(p=>{
+      const owed=perPersonOwed[p]||0, paid=perPersonPaid[p]||0, balance=paid-owed;
+      return `<div class="person-summary">
+        <div class="person-summary-header">
+          <div class="avatar-lg ${getColor(p)}" style="color:#fff">${p[0].toUpperCase()}</div>
+          <div style="flex:1"><div class="person-name">${p}</div><div style="font-size:12px;color:var(--muted)">Share: ${fmt(owed)}</div></div>
+          <div><div class="person-total ${balance>=0?'amount-green':'amount-red'}">${balance>=0?'+':''}${fmt(balance)}</div>
+          <div style="font-size:11px;color:var(--muted);text-align:right">${balance>=0?'gets back':'owes'}</div></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px">
+          <span>Share of expenses</span><span class="mono">${fmt(owed)}</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill ${getColor(p)}" style="width:${(owed/maxSpend*100).toFixed(1)}%"></div></div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:8px">
+          <span style="color:var(--muted)">Paid</span><span class="mono">${fmt(paid)}</span>
+        </div>
+      </div>`;
+    }).join('')}
+    <div style="margin-top:16px;padding:14px;background:var(--surface2);border-radius:12px;border:1px solid var(--border)">
+      <div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Settlements</div>
+      ${getSettlements(trip.people,perPersonOwed,perPersonPaid)}
+    </div>`;
+}
+
+function getSettlements(people,owed,paid) {
+  const balance={};
+  people.forEach(p=>{ balance[p]=(paid[p]||0)-(owed[p]||0); });
+  const creditors=people.filter(p=>balance[p]>0.5).map(p=>({name:p,amt:balance[p]}));
+  const debtors=people.filter(p=>balance[p]<-0.5).map(p=>({name:p,amt:-balance[p]}));
+  const txns=[];
+  let ci=0,di=0;
+  while(ci<creditors.length&&di<debtors.length){
+    const pay=Math.min(creditors[ci].amt,debtors[di].amt);
+    txns.push({from:debtors[di].name,to:creditors[ci].name,amt:pay});
+    creditors[ci].amt-=pay; debtors[di].amt-=pay;
+    if(creditors[ci].amt<0.5)ci++; if(debtors[di].amt<0.5)di++;
+  }
+  if(txns.length===0) return '<div style="color:var(--muted);font-size:13px">All settled up! ✅</div>';
+  return txns.map(t=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+      <div style="font-size:14px"><span style="font-weight:700">${t.from}</span> <span style="color:var(--muted)">→</span> <span style="font-weight:700">${t.to}</span></div>
+      <div class="mono amount-red" style="font-size:14px">${fmt(Math.round(t.amt))}</div>
+    </div>`).join('');
+}
+
+// ─── EXPORT ──────────────────────────────────────────────────────
+function renderExport() {
+  const el = document.getElementById('export-content');
+  const id = state.exportTrip;
+  if (!id) { el.innerHTML=''; return; }
+  const trip = state.trips.find(t=>t.id===id); if (!trip) return;
+  const exps = state.expenses.filter(e=>e.tripId===id);
+  const total = exps.reduce((s,e)=>s+e.amount,0);
+
+  el.innerHTML=`
+    <div class="card">
+      <div style="font-size:16px;font-weight:700;margin-bottom:4px">${trip.name}</div>
+      <div style="font-size:13px;color:var(--muted);margin-bottom:12px">${trip.dest||''} · ${trip.people.join(', ')}</div>
+      <div style="display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--border)">
+        <span style="color:var(--muted)">Total Expenses</span><span class="mono amount-green">${fmt(total)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--border)">
+        <span style="color:var(--muted)">No. of Entries</span><span>${exps.length}</span>
+      </div>
+    </div>
+    <button class="btn btn-primary" style="margin-bottom:10px" onclick="exportCSV()">📥 Download CSV</button>
+    <button class="btn btn-secondary" onclick="copyReport()">📋 Copy Text Report (WhatsApp)</button>
+    <div id="copy-confirm" style="display:none;color:var(--green);text-align:center;margin-top:10px;font-size:13px">✅ Copied to clipboard!</div>`;
+}
+
+window.exportCSV = function() {
+  const id=state.exportTrip;
+  const trip=state.trips.find(t=>t.id===id); if (!trip) return;
+  const exps=state.expenses.filter(e=>e.tripId===id);
+  const rows=[['Date','Description','Category','Paid By','Amount','Split','People'].join(',')];
+  exps.forEach(e=>{
+    rows.push([e.date,`"${e.desc}"`,`"${e.cat}"`,e.paidBy,e.amount,e.split,`"${e.people.join(', ')}"`].join(','));
+  });
+  rows.push(['','','','TOTAL',exps.reduce((s,e)=>s+e.amount,0),'',''].join(','));
+  const blob=new Blob([rows.join('\n')],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url; a.download=`${trip.name.replace(/\s+/g,'-')}-expenses.csv`; a.click();
+}
+
+window.copyReport = function() {
+  const id=state.exportTrip;
+  const trip=state.trips.find(t=>t.id===id); if (!trip) return;
+  const exps=state.expenses.filter(e=>e.tripId===id);
+  const total=exps.reduce((s,e)=>s+e.amount,0);
+  const lines=[
+    `🧾 TRIP EXPENSE REPORT`,
+    `Trip: ${trip.name}`,
+    `Destination: ${trip.dest||'N/A'}`,
+    `People: ${trip.people.join(', ')}`,
+    `Total: ₹${total.toLocaleString('en-IN')}`,``,
+    `📋 EXPENSES:`,
+    ...exps.map(e=>`[${e.date}] ${e.desc} — ₹${e.amount} (Paid by ${e.paidBy}, ${e.split==='equal'?'split equally':'personal'})`),
+    ``,`Generated by TripLedger`
+  ];
+  navigator.clipboard.writeText(lines.join('\n')).then(()=>{
+    const el=document.getElementById('copy-confirm');
+    el.style.display='block';
+    setTimeout(()=>el.style.display='none',3000);
+  });
+}
+
+// ─── INIT ────────────────────────────────────────────────────────
+startListeners();
+document.getElementById('header-date').textContent = new Date().toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+document.querySelectorAll('.modal-overlay').forEach(overlay=>{
+  overlay.addEventListener('click',function(e){ if(e.target===this) this.classList.remove('open'); });
+});
+document.getElementById('person-input').addEventListener('keydown',e=>{ if(e.key==='Enter') addPerson(); });
+
+</script>
+
+<style>
+  :root {
+    --bg:#0c0e14; --surface:#13161f; --surface2:#1a1e2a;
+    --border:#252a38; --accent:#4f8ef7; --accent2:#7c5cfc;
+    --green:#2dd4a0; --red:#f75b5b; --yellow:#f7c04f;
+    --text:#e8eaf0; --muted:#6b7280; --card:#161923;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;max-width:480px;margin:0 auto;}
+  .mono{font-family:'DM Mono',monospace;}
+
+  .header{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--bg);z-index:100;border-bottom:1px solid var(--border);}
+  .logo{font-size:20px;font-weight:800;letter-spacing:-0.5px;}
+  .logo span{color:var(--accent);}
+  .sync-row{display:flex;align-items:center;gap:6px;}
+  #sync-dot{width:8px;height:8px;border-radius:50%;background:var(--yellow);transition:background 0.3s;}
+  .sync-label{font-size:11px;color:var(--muted);}
+
+  .nav{display:flex;background:var(--surface);border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;}
+  .nav::-webkit-scrollbar{display:none;}
+  .nav-btn{flex:1;min-width:70px;padding:14px 8px;background:none;border:none;color:var(--muted);font-family:'Syne',sans-serif;font-size:11px;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;cursor:pointer;transition:all 0.2s;border-bottom:2px solid transparent;white-space:nowrap;}
+  .nav-btn.active{color:var(--accent);border-bottom-color:var(--accent);}
+
+  .page{display:none;padding:20px;padding-bottom:100px;}
+  .page.active{display:block;}
+  .section-title{font-size:22px;font-weight:800;letter-spacing:-0.5px;margin-bottom:4px;}
+  .section-sub{font-size:13px;color:var(--muted);margin-bottom:20px;}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px;transition:border-color 0.2s;}
+  .card-row{display:flex;align-items:center;justify-content:space-between;}
+  .card-title{font-size:15px;font-weight:700;}
+  .card-sub{font-size:12px;color:var(--muted);margin-top:2px;}
+  .tag{font-size:10px;font-weight:700;padding:3px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:0.5px;}
+  .tag-active{background:rgba(79,142,247,.15);color:var(--accent);}
+  .tag-closed{background:rgba(107,114,128,.15);color:var(--muted);}
+
+  .amount{font-family:'DM Mono',monospace;font-size:18px;font-weight:500;}
+  .amount-sm{font-family:'DM Mono',monospace;font-size:13px;}
+  .amount-green{color:var(--green);}
+  .amount-red{color:var(--red);}
+
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px;}
+  .stat-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;}
+  .stat-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;}
+  .stat-value{font-family:'DM Mono',monospace;font-size:22px;font-weight:500;}
+
+  .form-group{margin-bottom:14px;}
+  label{font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:6px;}
+  input,select,textarea{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;color:var(--text);font-family:'Syne',sans-serif;font-size:15px;outline:none;transition:border-color 0.2s;}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent);}
+  select option{background:var(--surface2);}
+
+  .btn{width:100%;padding:15px;border:none;border-radius:12px;font-family:'Syne',sans-serif;font-size:15px;font-weight:700;cursor:pointer;transition:all 0.2s;letter-spacing:0.3px;}
+  .btn-primary{background:var(--accent);color:#fff;}
+  .btn-primary:active{background:#3a7ae0;transform:scale(0.98);}
+  .btn-secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border);}
+  .btn-danger{background:rgba(247,91,91,.15);color:var(--red);border:1px solid rgba(247,91,91,.3);}
+  .btn-green{background:rgba(45,212,160,.15);color:var(--green);border:1px solid rgba(45,212,160,.3);}
+  .btn-sm{padding:8px 14px;font-size:12px;width:auto;border-radius:8px;}
+
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;backdrop-filter:blur(4px);align-items:flex-end;max-width:480px;margin:0 auto;}
+  .modal-overlay.open{display:flex;}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:24px 24px 0 0;padding:24px 20px;width:100%;max-height:90vh;overflow-y:auto;animation:slideUp 0.3s ease;}
+  @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+  .modal-handle{width:40px;height:4px;background:var(--border);border-radius:2px;margin:0 auto 20px;}
+  .modal-title{font-size:20px;font-weight:800;margin-bottom:20px;}
+
+  .people-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}
+  .person-chip{display:flex;align-items:center;gap:6px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:6px 10px 6px 6px;font-size:13px;font-weight:600;}
+  .avatar{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;}
+  .avatar-lg{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;flex-shrink:0;}
+  .chip-del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:0;margin-left:2px;}
+
+  .expense-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);}
+  .expense-row:last-child{border-bottom:none;}
+  .expense-icon{width:38px;height:38px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;}
+  .expense-info{flex:1;min-width:0;}
+  .expense-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .expense-meta{font-size:11px;color:var(--muted);margin-top:1px;}
+
+  .person-summary{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:10px;}
+  .person-summary-header{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+  .person-name{font-size:15px;font-weight:700;}
+  .person-total{font-family:'DM Mono',monospace;font-size:20px;}
+  .progress-bar{height:6px;background:var(--surface2);border-radius:3px;overflow:hidden;margin:8px 0;}
+  .progress-fill{height:100%;border-radius:3px;transition:width 0.5s ease;}
+
+  .trip-selector{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;cursor:pointer;margin-bottom:20px;}
+  .trip-selector-label{font-size:12px;color:var(--muted);}
+  .trip-selector-value{font-size:15px;font-weight:700;}
+
+  .cat-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;}
+  .cat-chip{padding:7px 12px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--muted);transition:all 0.15s;}
+  .cat-chip.selected{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);}
+
+  .split-toggle{display:flex;gap:8px;margin-bottom:14px;}
+  .split-btn{flex:1;padding:10px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'Syne',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;}
+  .split-btn.active{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);}
+
+  .fab{position:fixed;bottom:24px;right:calc(50% - 220px);width:56px;height:56px;border-radius:16px;background:var(--accent);border:none;color:#fff;font-size:26px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(79,142,247,.4);transition:all 0.2s;z-index:99;}
+  .fab:active{transform:scale(0.92);}
+
+  .empty{text-align:center;padding:48px 20px;color:var(--muted);}
+  .empty-icon{font-size:48px;margin-bottom:12px;}
+  .empty-text{font-size:14px;}
+
+  /* loading overlay */
+  #loading-screen{position:fixed;inset:0;background:var(--bg);z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+  .spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .c1{background:#4f8ef7} .c2{background:#7c5cfc} .c3{background:#2dd4a0}
+  .c4{background:#f7c04f} .c5{background:#f75b5b} .c6{background:#f77d4f}
+  .c7{background:#4fd4d4} .c8{background:#d44fac}
+</style>
+</head>
+<body>
+
+<!-- Loading Screen -->
+<div id="loading-screen">
+  <div class="logo" style="font-size:28px;font-family:'Syne',sans-serif;font-weight:800">Trip<span style="color:#4f8ef7">Ledger</span></div>
+  <div class="spinner"></div>
+  <div style="font-size:13px;color:#6b7280">Connecting to database...</div>
+</div>
+
+<div class="header">
+  <div class="logo">Trip<span>Ledger</span></div>
+  <div class="sync-row">
+    <div id="sync-dot"></div>
+    <div class="sync-label mono" id="header-date"></div>
+  </div>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" onclick="showPage('trips')">✈️ Trips</button>
+  <button class="nav-btn" onclick="showPage('expenses')">💸 Expenses</button>
+  <button class="nav-btn" onclick="showPage('summary')">📊 Summary</button>
+  <button class="nav-btn" onclick="showPage('export')">📤 Export</button>
+</div>
+
+<!-- TRIPS PAGE -->
+<div class="page active" id="page-trips">
+  <div class="section-title">My Trips</div>
+  <div class="section-sub">All business journeys · synced live</div>
+  <div id="trips-list"></div>
+  <div class="empty" id="trips-empty" style="display:none">
+    <div class="empty-icon">✈️</div>
+    <div class="empty-text">No trips yet. Tap + to add your first trip.</div>
+  </div>
+</div>
+
+<!-- EXPENSES PAGE -->
+<div class="page" id="page-expenses">
+  <div class="section-title">Expenses</div>
+  <div class="section-sub">Track spends per person</div>
+  <div class="trip-selector" onclick="openTripPicker()">
+    <div>
+      <div class="trip-selector-label">ACTIVE TRIP</div>
+      <div class="trip-selector-value" id="active-trip-name">Select a trip</div>
+    </div>
+    <div style="color:var(--muted)">▼</div>
+  </div>
+  <div id="expenses-stats" style="display:none">
+    <div class="stat-grid">
+      <div class="stat-card"><div class="stat-label">Total Spent</div><div class="stat-value amount-green" id="exp-total">₹0</div></div>
+      <div class="stat-card"><div class="stat-label">Entries</div><div class="stat-value" id="exp-count">0</div></div>
+    </div>
+  </div>
+  <div id="expenses-list"></div>
+  <div class="empty" id="expenses-empty">
+    <div class="empty-icon">💸</div>
+    <div class="empty-text">Select a trip and add expenses.</div>
+  </div>
+</div>
+
+<!-- SUMMARY PAGE -->
+<div class="page" id="page-summary">
+  <div class="section-title">Summary</div>
+  <div class="section-sub">Per-person breakdown</div>
+  <div class="trip-selector" onclick="openTripPicker('summary')">
+    <div>
+      <div class="trip-selector-label">VIEWING TRIP</div>
+      <div class="trip-selector-value" id="summary-trip-name">Select a trip</div>
+    </div>
+    <div style="color:var(--muted)">▼</div>
+  </div>
+  <div id="summary-content"></div>
+</div>
+
+<!-- EXPORT PAGE -->
+<div class="page" id="page-export">
+  <div class="section-title">Export</div>
+  <div class="section-sub">Share trip reports</div>
+  <div class="trip-selector" onclick="openTripPicker('export')">
+    <div>
+      <div class="trip-selector-label">EXPORT TRIP</div>
+      <div class="trip-selector-value" id="export-trip-name">Select a trip</div>
+    </div>
+    <div style="color:var(--muted)">▼</div>
+  </div>
+  <div id="export-content"></div>
+</div>
+
+<!-- FAB -->
+<button class="fab" id="fab-btn" onclick="handleFab()">+</button>
+
+<!-- MODAL: ADD TRIP -->
+<div class="modal-overlay" id="modal-trip">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">New Trip</div>
+    <div class="form-group">
+      <label>Trip Name</label>
+      <input type="text" id="trip-name-input" placeholder="e.g. Mumbai Client Visit">
+    </div>
+    <div class="form-group">
+      <label>Destination</label>
+      <input type="text" id="trip-dest-input" placeholder="e.g. Mumbai">
+    </div>
+    <div class="form-group">
+      <label>Start Date</label>
+      <input type="date" id="trip-start-input">
+    </div>
+    <div class="form-group">
+      <label>End Date</label>
+      <input type="date" id="trip-end-input">
+    </div>
+    <div class="form-group">
+      <label>People on this trip</label>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <input type="text" id="person-input" placeholder="Person name" style="flex:1">
+        <button class="btn btn-primary btn-sm" onclick="addPerson()">Add</button>
+      </div>
+      <div class="people-row" id="people-chips"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="btn btn-secondary" onclick="closeModal('modal-trip')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveTrip()">Create Trip</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: ADD EXPENSE -->
+<div class="modal-overlay" id="modal-expense">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">Log Expense</div>
+    <div class="form-group">
+      <label>Description</label>
+      <input type="text" id="exp-desc-input" placeholder="e.g. Hotel, Lunch, Cab">
+    </div>
+    <div class="form-group">
+      <label>Category</label>
+      <div class="cat-row" id="cat-row">
+        <div class="cat-chip selected" onclick="selectCat(this)" data-cat="🏨 Hotel">🏨 Hotel</div>
+        <div class="cat-chip" onclick="selectCat(this)" data-cat="🍽️ Food">🍽️ Food</div>
+        <div class="cat-chip" onclick="selectCat(this)" data-cat="🚗 Transport">🚗 Transport</div>
+        <div class="cat-chip" onclick="selectCat(this)" data-cat="✈️ Flight">✈️ Flight</div>
+        <div class="cat-chip" onclick="selectCat(this)" data-cat="🎫 Tickets">🎫 Tickets</div>
+        <div class="cat-chip" onclick="selectCat(this)" data-cat="📦 Other">📦 Other</div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Amount (₹)</label>
+      <input type="number" id="exp-amount-input" placeholder="0">
+    </div>
+    <div class="form-group">
+      <label>Paid by</label>
+      <select id="exp-paidby-input"></select>
+    </div>
+    <div class="form-group">
+      <label>Split type</label>
+      <div class="split-toggle">
+        <button class="split-btn active" id="split-equal-btn" onclick="setSplit('equal')">Equal split</button>
+        <button class="split-btn" id="split-person-btn" onclick="setSplit('person')">This person only</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Date</label>
+      <input type="date" id="exp-date-input">
+    </div>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="btn btn-secondary" onclick="closeModal('modal-expense')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveExpense()">Add Expense</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: TRIP PICKER -->
+<div class="modal-overlay" id="modal-picker">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-title">Select Trip</div>
+    <div id="trip-picker-list"></div>
+    <button class="btn btn-secondary" style="margin-top:12px" onclick="closeModal('modal-picker')">Cancel</button>
+  </div>
+</div>
+
+<!-- MODAL: TRIP DETAIL -->
+<div class="modal-overlay" id="modal-trip-detail">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <div id="trip-detail-content"></div>
+    <button class="btn btn-secondary" onclick="closeModal('modal-trip-detail')">Close</button>
+  </div>
+</div>
+
+<script>
+  // Hide loading screen once Firebase fires first snapshot
+  const _origStartListeners = window.__firebaseReady;
+  let _loaded = false;
+  function hideLoader() {
+    if (_loaded) return; _loaded = true;
+    const ls = document.getElementById('loading-screen');
+    ls.style.opacity = '0';
+    ls.style.transition = 'opacity 0.4s';
+    setTimeout(() => ls.style.display = 'none', 400);
+  }
+  // Fallback hide after 3s in case of slow connection
+  setTimeout(hideLoader, 3000);
+  // Listen for first render
+  const _origRenderTrips = window.renderTrips;
+  document.addEventListener('firebase-ready', hideLoader);
+  // We call hideLoader after first onSnapshot fires via a CustomEvent
+  window.__hideLoader = hideLoader;
+</script>
+
+<script type="module">
+  // Patch: fire event after first snapshot to hide loader
+  import { getFirestore, collection, query, orderBy, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  // Already initialized above — just dispatch event after 500ms as fallback
+  setTimeout(() => {
+    window.__hideLoader && window.__hideLoader();
+  }, 1500);
+</script>
+
+</body>
+</html>
