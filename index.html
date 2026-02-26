@@ -297,7 +297,17 @@ window.selectCat = function(el) {
 window.setSplit = function(type) {
   state.splitType = type;
   document.getElementById('split-equal-btn').classList.toggle('active', type==='equal');
+  document.getElementById('split-custom-btn').classList.toggle('active', type==='custom');
   document.getElementById('split-person-btn').classList.toggle('active', type==='person');
+  document.getElementById('custom-people-row').style.display = type==='custom' ? 'block' : 'none';
+}
+
+window.toggleCustomPerson = function(name) {
+  const chip = document.querySelector(`.custom-chip[data-name="${name}"]`);
+  const selected = chip.classList.toggle('selected');
+  chip.style.background = selected ? 'rgba(79,142,247,0.2)' : 'var(--surface2)';
+  chip.style.borderColor = selected ? 'var(--accent)' : 'var(--border)';
+  chip.style.color = selected ? 'var(--accent)' : 'var(--muted)';
 }
 
 function openAddExpense() {
@@ -312,6 +322,12 @@ function openAddExpense() {
   document.querySelector('.cat-chip').classList.add('selected');
   state.selectedCat = '🏨 Hotel';
   setSplit('equal');
+  // render custom people chips (all selected by default)
+  document.getElementById('custom-people-chips').innerHTML = trip.people.map(p=>`
+    <div class="custom-chip person-chip selected" data-name="${p}" onclick="toggleCustomPerson('${p}')"
+      style="cursor:pointer;background:rgba(79,142,247,0.2);border-color:var(--accent);color:var(--accent)">
+      <div class="avatar ${getColor(p)}" style="color:#fff">${p[0].toUpperCase()}</div>${p}
+    </div>`).join('');
   openModal('modal-expense');
 }
 
@@ -322,13 +338,24 @@ window.saveExpense = async function() {
   const date = document.getElementById('exp-date-input').value;
   if (!desc || !amount) return alert('Please fill description and amount');
   const trip = state.trips.find(t=>t.id===state.activeTrip);
+
+  let splitPeople;
+  if (state.splitType === 'equal') {
+    splitPeople = [...trip.people];
+  } else if (state.splitType === 'person') {
+    splitPeople = [paidBy];
+  } else if (state.splitType === 'custom') {
+    splitPeople = [...document.querySelectorAll('.custom-chip.selected')].map(el=>el.dataset.name);
+    if (splitPeople.length === 0) return alert('Please select at least one person for custom split');
+  }
+
   updateSyncStatus('syncing');
   await addExpense({
     tripId: state.activeTrip,
     desc, amount: Number(amount), paidBy, date,
     cat: state.selectedCat,
     split: state.splitType,
-    people: state.splitType==='equal' ? [...trip.people] : [paidBy]
+    people: splitPeople
   });
   closeModal('modal-expense');
 }
@@ -621,7 +648,7 @@ document.getElementById('person-input').addEventListener('keydown',e=>{ if(e.key
   .cat-chip{padding:7px 12px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;background:var(--surface2);border:1px solid var(--border);color:var(--muted);transition:all 0.15s;}
   .cat-chip.selected{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);}
 
-  .split-toggle{display:flex;gap:8px;margin-bottom:14px;}
+  .split-toggle{display:flex;gap:6px;margin-bottom:14px;}
   .split-btn{flex:1;padding:10px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'Syne',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;}
   .split-btn.active{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);}
 
@@ -797,10 +824,15 @@ document.getElementById('person-input').addEventListener('keydown',e=>{ if(e.key
       <select id="exp-paidby-input"></select>
     </div>
     <div class="form-group">
-      <label>Split type</label>
+      <label>Split between</label>
       <div class="split-toggle">
-        <button class="split-btn active" id="split-equal-btn" onclick="setSplit('equal')">Equal split</button>
-        <button class="split-btn" id="split-person-btn" onclick="setSplit('person')">This person only</button>
+        <button class="split-btn active" id="split-equal-btn" onclick="setSplit('equal')">All equally</button>
+        <button class="split-btn" id="split-custom-btn" onclick="setSplit('custom')">Custom</button>
+        <button class="split-btn" id="split-person-btn" onclick="setSplit('person')">Only me</button>
+      </div>
+      <div id="custom-people-row" style="display:none;margin-top:10px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tap to select who shares this:</div>
+        <div id="custom-people-chips" class="people-row" style="margin-bottom:0"></div>
       </div>
     </div>
     <div class="form-group">
