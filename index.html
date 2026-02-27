@@ -52,6 +52,21 @@ function startListeners() {
   const tripsQ = query(collection(db, 'trips'), orderBy('created', 'desc'));
   state.unsubTrips = onSnapshot(tripsQ, snap => {
     state.trips = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // Auto-select if only one active trip
+    if (!state.activeTrip) {
+      const activeTrips = state.trips.filter(t => t.status === 'active');
+      if (activeTrips.length === 1) {
+        state.activeTrip = activeTrips[0].id;
+        state.summaryTrip = activeTrips[0].id;
+        state.exportTrip = activeTrips[0].id;
+        const el1 = document.getElementById('active-trip-name');
+        const el2 = document.getElementById('summary-trip-name');
+        const el3 = document.getElementById('export-trip-name');
+        if (el1) el1.textContent = activeTrips[0].name;
+        if (el2) el2.textContent = activeTrips[0].name;
+        if (el3) el3.textContent = activeTrips[0].name;
+      }
+    }
     if (state.currentPage === 'trips') renderTrips();
     updateSyncStatus('synced');
   }, err => {
@@ -115,6 +130,20 @@ window.showPage = function(p) {
   document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
   document.getElementById('page-' + p).classList.add('active');
   document.querySelectorAll('.nav-btn')[['trips','expenses','summary','export'].indexOf(p)].classList.add('active');
+
+  // Auto-select trip if only one active trip and none selected
+  if ((p === 'expenses' || p === 'summary' || p === 'export') && !state.activeTrip) {
+    const activeTrips = state.trips.filter(t => t.status === 'active');
+    if (activeTrips.length === 1) {
+      state.activeTrip = activeTrips[0].id;
+      state.summaryTrip = activeTrips[0].id;
+      state.exportTrip = activeTrips[0].id;
+      document.getElementById('active-trip-name').textContent = activeTrips[0].name;
+      document.getElementById('summary-trip-name').textContent = activeTrips[0].name;
+      document.getElementById('export-trip-name').textContent = activeTrips[0].name;
+    }
+  }
+
   if (p === 'expenses') renderExpenses();
   if (p === 'summary') renderSummary();
   if (p === 'export') renderExport();
@@ -403,7 +432,7 @@ function renderExpenses() {
           <div class="expense-icon">${e.cat.split(' ')[0]}</div>
           <div class="expense-info">
             <div class="expense-name">${e.desc}</div>
-            <div class="expense-meta">${e.paidBy} paid · ${e.split==='equal'?'split equally':'personal'}</div>
+            <div class="expense-meta">${e.paidBy} paid · ${e.split==='equal'?'split equally': e.split==='custom' ? 'split: '+e.people.join(', ') : 'personal'}</div>
           </div>
           <div style="text-align:right">
             <div class="amount-sm amount-green mono">${fmt(e.amount)}</div>
@@ -652,7 +681,7 @@ document.getElementById('person-input').addEventListener('keydown',e=>{ if(e.key
   .split-btn{flex:1;padding:10px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--muted);font-family:'Syne',sans-serif;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.15s;}
   .split-btn.active{background:rgba(79,142,247,.2);border-color:var(--accent);color:var(--accent);}
 
-  .fab{position:fixed;bottom:24px;right:calc(50% - 220px);width:56px;height:56px;border-radius:16px;background:var(--accent);border:none;color:#fff;font-size:26px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(79,142,247,.4);transition:all 0.2s;z-index:99;}
+  .fab{position:fixed;bottom:24px;right:20px;width:56px;height:56px;border-radius:16px;background:var(--accent);border:none;color:#fff;font-size:26px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 24px rgba(79,142,247,.4);transition:all 0.2s;z-index:99;}
   .fab:active{transform:scale(0.92);}
 
   .empty{text-align:center;padding:48px 20px;color:var(--muted);}
